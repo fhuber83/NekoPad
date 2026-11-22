@@ -1,0 +1,37 @@
+# clang-format 23 — formatting differs between major versions, so use 23.x.
+#
+# Tuned to the code as it was before the formatting commit, so that commit changed as
+# little as possible. That commit is listed in .git-blame-ignore-revs; run
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# once per clone so `git blame` skips it.
+#
+# Format: find src tests -name '*.?pp' | xargs clang-format -i
+---
+Language: Cpp
+Standard: Latest
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+IndentCaseLabels: false
+NamespaceIndentation: None
+PointerAlignment: Left
+ReferenceAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortBlocksOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: Yes
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: Never
+BinPackArguments: false
+BinPackParameters: OnePerLine
+AlignAfterOpenBracket: AlwaysBreak
+SpacesBeforeTrailingComments: 1
+FixNamespaceComments: true
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+InsertNewlineAtEOF: true
+BreakStringLiterals: false

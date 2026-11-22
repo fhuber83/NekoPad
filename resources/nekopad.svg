@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFDF5"/>
+      <stop offset="1" stop-color="#F1EAD6"/>
+    </linearGradient>
+    <linearGradient id="fur" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4B5563"/>
+      <stop offset="1" stop-color="#1F2937"/>
+    </linearGradient>
+  </defs>
+  <!-- cat ears behind the pad -->
+  <path d="M58 70 L76 14 L112 56 Z" fill="url(#fur)"/>
+  <path d="M198 70 L180 14 L144 56 Z" fill="url(#fur)"/>
+  <path d="M70 58 L79 30 L98 52 Z" fill="#F9A8D4"/>
+  <path d="M186 58 L177 30 L158 52 Z" fill="#F9A8D4"/>
+  <!-- the pad -->
+  <rect x="40" y="48" width="176" height="196" rx="18" fill="url(#fur)"/>
+  <rect x="52" y="64" width="152" height="168" rx="10" fill="url(#paper)"/>
+  <!-- rings of the binding -->
+  <g fill="none" stroke="#9CA3AF" stroke-width="7" stroke-linecap="round">
+    <path d="M80 44 v28"/><path d="M112 44 v28"/><path d="M144 44 v28"/><path d="M176 44 v28"/>
+  </g>
+  <!-- lines of code -->
+  <g stroke-width="9" stroke-linecap="round">
+    <path d="M72 100 h56" stroke="#2563EB"/>
+    <path d="M140 100 h40" stroke="#9CA3AF"/>
+    <path d="M88 126 h72" stroke="#DB2777"/>
+    <path d="M88 152 h40" stroke="#059669"/>
+    <path d="M140 152 h28" stroke="#9CA3AF"/>
+    <path d="M72 178 h24" stroke="#2563EB"/>
+  </g>
+  <!-- whiskers -->
+  <g stroke="#1F2937" stroke-width="5" stroke-linecap="round">
+    <path d="M150 206 l34 -6"/><path d="M150 214 l36 2"/>
+    <path d="M106 206 l-34 -6"/><path d="M106 214 l-36 2"/>
+  </g>
+  <path d="M120 204 h16 l-8 9 Z" fill="#F472B6"/>
+</svg>

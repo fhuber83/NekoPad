@@ -1,0 +1,36 @@
+# Neko Pad's UI icons in Lucide (https://lucide.dev, pinned by NekoControls).
+#
+# One line per icon: <logical name>=<Lucide file name without .svg>. The code asks for
+# the logical name only (neko::theme::themedIcon("save")); neko_add_icon_set() in
+# CMakeLists.txt compiles the mapped files in, after the controls' own icons (the
+# editor's Find bar), which a line here may override. Names shared with Neko Grid and
+# Neko Note use the same file. Edit, then re-run CMake.
+
+about=info
+comment=message-square-code
+copy=copy
+cut=scissors
+file=file-text
+file-modified=file-pen-line
+find=search
+folder=folder-open
+font=type
+go-to-line=arrow-down-to-line
+new=file-plus
+open=folder-open
+paste=clipboard-paste
+quit=log-out
+read-only=lock
+recent=clock
+redo=redo-2
+reload=refresh-cw
+replace=replace
+save=save
+save-all=save-all
+show-whitespace=pilcrow
+tab-close=x
+theme=palette
+undo=undo-2
+widget-style=monitor
+zoom-in=zoom-in
+zoom-out=zoom-out

@@ -1,0 +1,13 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/nekopad">
+        <file>icons/app/nekopad_16.png</file>
+        <file>icons/app/nekopad_24.png</file>
+        <file>icons/app/nekopad_32.png</file>
+        <file>icons/app/nekopad_48.png</file>
+        <file>icons/app/nekopad_64.png</file>
+        <file>icons/app/nekopad_128.png</file>
+        <file>icons/app/nekopad_256.png</file>
+        <file>icons/app/nekopad_512.png</file>
+    </qresource>
+</RCC>
