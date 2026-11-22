@@ -1,12 +1,14 @@
 // Tests of nekopad_core, linked alone: encodings, line endings, files, languages, line
 // operations.
 
+#include "core/backup_store.hpp"
 #include "core/language.hpp"
 #include "core/line_ops.hpp"
 #include "core/text_encoding.hpp"
 #include "core/text_file.hpp"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -112,6 +114,11 @@ private slots:
         QCOMPARE(back.encoding, e);
         QCOMPARE(back.eol, lineEnd);
         QCOMPARE(back.text, text);
+        if (e == Encoding::Utf8Bom || e == Encoding::Utf16LeBom || e == Encoding::Utf16BeBom) {
+            // A text that starts with U+FEFF keeps it: only the file's own BOM goes.
+            const QString zwnbsp = QChar(0xFEFF) + text;
+            QCOMPARE(decode(encode(zwnbsp, e, lineEnd)).text, zwnbsp);
+        }
     }
 
     void testCanEncode() {
@@ -156,6 +163,37 @@ private slots:
             QByteArray(
                 "\xEF\xBB\xBF"
                 "drei\r\nvier\r\n"));
+    }
+
+    void testBackupStoreRoundTripsAnyText() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        BackupStore store(dir.filePath(QStringLiteral("backup"))); // made when first written
+        const QString a = store.newPath(QStringLiteral("new 1"));
+        const QString b = store.newPath(QStringLiteral("new 1"));
+        QVERIFY(a != b); // handed out, not written yet: still taken
+        QVERIFY(QFileInfo(a).fileName().startsWith(QStringLiteral("new 1@")));
+        QVERIFY(!QFileInfo(store.newPath(QStringLiteral("a/b:c*?"))).fileName().contains(u'/'));
+
+        // A leading BOM character, a non-breaking space, CJK, an emoji, an empty last line.
+        const QString text = QStringLiteral("\uFEFFeins\u00A0zwei\n\u732B \U0001F431\n\n");
+        store.write(a, text);
+        store.waitForDone();
+        QVERIFY(!store.failed(a));
+        const LoadedFile loaded = BackupStore::read(a);
+        QVERIFY(loaded.ok);
+        QCOMPARE(loaded.decoded.text, text);
+
+        // In order: the last write wins, and a removal does not overtake a write.
+        for (int i = 0; i < 50; ++i) {
+            store.write(b, QString::number(i));
+        }
+        store.waitForDone();
+        QCOMPARE(BackupStore::read(b).decoded.text, QStringLiteral("49"));
+        store.write(b, QStringLiteral("gone"));
+        store.remove(b);
+        store.waitForDone();
+        QVERIFY(!QFileInfo::exists(b));
     }
 
     void testLoadEmptyAndMissing() {

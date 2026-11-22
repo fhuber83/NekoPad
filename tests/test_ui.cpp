@@ -4,6 +4,7 @@
 //
 // NEKOPAD_TEST_SCREENSHOTS=<dir> also saves the window in a light and a dark theme there.
 
+#include "core/backup_store.hpp"
 #include "core/language.hpp"
 #include "ui/editor_tab.hpp"
 #include "ui/main_window.hpp"
@@ -34,11 +35,13 @@
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QThread>
+#include <QTimer>
 #include <QtTest>
 
 namespace th = neko::theme;
 using neko::pad::ui::EditorTab;
 using neko::pad::ui::MainWindow;
+namespace settings = neko::pad::ui::settings;
 
 namespace {
 
@@ -363,6 +366,100 @@ private slots:
         window.tabWidget()->setCurrentIndex(0);
         QTRY_COMPARE(window.tabAt(0)->loadState(), EditorTab::LoadState::Ready);
         QCOMPARE(window.tabAt(0)->cursorLineColumn(), std::make_pair(2, 1));
+    }
+
+    /// Notepad++'s session snapshot: closing keeps new documents and unsaved changes
+    /// without asking, and the next start shows them again, still unsaved.
+    void testUnsavedChangesSurviveARestart() {
+        const QString backups = dir_.filePath(QStringLiteral("backups"));
+        const QString file = dir_.filePath(QStringLiteral("snapshot.txt"));
+        writeFile(file, "saved\r\n");
+        // Any question would block the offscreen test: fail on it instead.
+        QTimer guard;
+        connect(&guard, &QTimer::timeout, this, [] {
+            if (QWidget* modal = QApplication::activeModalWidget()) {
+                modal->close();
+                QFAIL("A dialog asked about unsaved changes.");
+            }
+        });
+        guard.start(50);
+        {
+            MainWindow window(nullptr, backups);
+            window.openFiles({file});
+            QTRY_COMPARE(window.tabAt(0)->loadState(), EditorTab::LoadState::Ready);
+            window.tabAt(0)->editor()->moveCursor(QTextCursor::End);
+            window.tabAt(0)->editor()->insertPlainText(QStringLiteral("unsaved\u00A0change\n"));
+            EditorTab* fresh = window.newDocument();
+            fresh->editor()->insertPlainText(QStringLiteral("a new note"));
+            fresh->setEol(neko::pad::Eol::CrLf);
+            window.newDocument(); // empty: nothing to keep
+            QVERIFY(window.close());
+        }
+        QCOMPARE(readFile(file), QByteArray("saved\r\n")); // the file itself is untouched
+        QCOMPARE(QDir(backups).entryList(QDir::Files).size(), 2);
+
+        MainWindow window(nullptr, backups);
+        window.restoreSession();
+        QCOMPARE(window.tabCount(), 2);
+        EditorTab* restored = window.tabAt(0);
+        EditorTab* note = window.tabAt(1);
+        QCOMPARE(note->displayName(), QStringLiteral("new 1"));
+        QVERIFY(restored->isModified()); // even before its text is read
+        QVERIFY(note->isModified());
+        // The current tab was the empty one, which is gone: the first one is current.
+        QTRY_COMPARE(restored->loadState(), EditorTab::LoadState::Ready);
+        QCOMPARE(note->loadState(), EditorTab::LoadState::Pending); // read when shown
+        window.tabWidget()->setCurrentIndex(1);
+        QTRY_COMPARE(note->loadState(), EditorTab::LoadState::Ready);
+        QCOMPARE(note->text(), QStringLiteral("a new note"));
+        QCOMPARE(note->eol(), neko::pad::Eol::CrLf);
+        QVERIFY(note->isModified());
+        QCOMPARE(restored->filePath(), file);
+        QCOMPARE(restored->text(), QStringLiteral("saved\nunsaved\u00A0change\n"));
+        QCOMPARE(restored->eol(), neko::pad::Eol::CrLf);
+        QVERIFY(restored->isModified());
+        QVERIFY(!restored->backupDirty()); // nothing new to write
+
+        // Saving makes the backup unnecessary; so does closing a tab (after asking).
+        QVERIFY(window.saveTab(restored));
+        QCOMPARE(
+            readFile(file),
+            QByteArray(
+                "saved\r\nunsaved\xC2\xA0"
+                "change\r\n"));
+        QVERIFY(restored->backupPath().isEmpty());
+        QVERIFY(window.closeTab(note, true));
+        window.backups().waitForDone();
+        QVERIFY(QDir(backups).entryList(QDir::Files).isEmpty());
+    }
+
+    /// The periodic backup writes only what changed, and drops backups no longer needed.
+    void testPeriodicBackup() {
+        const QString backups = dir_.filePath(QStringLiteral("periodic"));
+        MainWindow window(nullptr, backups);
+        EditorTab* tab = window.newDocument();
+        window.backupNow();
+        QVERIFY(tab->backupPath().isEmpty()); // empty: nothing to keep
+        tab->editor()->insertPlainText(QStringLiteral("draft"));
+        window.backupNow();
+        const QString path = tab->backupPath();
+        QVERIFY(!path.isEmpty());
+        window.backups().waitForDone();
+        QCOMPARE(neko::pad::BackupStore::read(path).decoded.text, QStringLiteral("draft"));
+        QVERIFY(!settings::sessionFiles().isEmpty()); // the session names it already
+        QCOMPARE(settings::sessionFiles().constLast().backup, path);
+
+        tab->editor()->insertPlainText(QStringLiteral(" two"));
+        window.backupNow();
+        window.backups().waitForDone();
+        QCOMPARE(neko::pad::BackupStore::read(path).decoded.text, QStringLiteral("draft two"));
+
+        tab->editor()->selectAll();
+        tab->editor()->textCursor().removeSelectedText();
+        window.backupNow();
+        window.backups().waitForDone();
+        QVERIFY(tab->backupPath().isEmpty());
+        QVERIFY(!QFileInfo::exists(path));
     }
 
     /// A file over EditorTab::kPrebuildThreshold is built and highlighted on the worker and

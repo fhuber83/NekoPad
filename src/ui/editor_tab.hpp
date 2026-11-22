@@ -5,6 +5,7 @@
 #include "core/text_file.hpp"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QPointer>
 #include <QSyntaxHighlighter>
 #include <QUrl>
@@ -70,8 +71,22 @@ public:
 
     /// Remembers `path` and reads it the first time ensureLoaded() is called.
     void setPendingFile(const QString& path);
+
+    /// Unsaved text kept across a restart (BackupStore), and what the document it belongs
+    /// to is: its file (empty for a new document) and how that is to be saved.
+    struct Backup {
+        QString backupPath;
+        QString filePath;
+        Encoding encoding = Encoding::Utf8;
+        Eol eol = nativeEol();
+        QDateTime fileModified; ///< the file's time when the unsaved changes began
+    };
+    /// Like setPendingFile(), but the text comes from the backup: once read, the tab shows
+    /// it as unsaved changes to `backup.filePath` (or as a modified new document). Until
+    /// then the tab counts as modified.
+    void setPendingBackup(const Backup& backup);
     /// Starts reading `path` on a worker thread; loaded() follows. `forced` decodes it in
-    /// that encoding instead of the detected one.
+    /// that encoding instead of the detected one. Drops a backup waiting to be read.
     void load(const QString& path, std::optional<Encoding> forced = std::nullopt);
     /// Reads the file now if it is pending; nothing otherwise.
     void ensureLoaded();
@@ -120,6 +135,23 @@ public:
     [[nodiscard]] QSyntaxHighlighter* highlighter() const noexcept { return highlighter_; }
 
     [[nodiscard]] bool isModified() const;
+    /// The document's text, with `\n` line breaks, exactly as it is.
+    [[nodiscard]] QString text() const;
+
+    // ---- Backup of unsaved changes (the window's BackupStore decides) -------------------
+
+    /// The file holding this tab's unsaved text, or empty.
+    [[nodiscard]] QString backupPath() const { return backupPath_; }
+    void setBackupPath(const QString& path) { backupPath_ = path; }
+    /// The document changed since backupPath() was last written (or read). Re-highlighting
+    /// counts as a change too (QTextDocument cannot tell): at worst one write too many.
+    [[nodiscard]] bool backupDirty() const noexcept { return backupDirty_; }
+    /// Marks the backup as written now (or as wanted again).
+    void setBackupDirty(bool dirty);
+    /// Milliseconds since the backup was last written or read; -1 if never.
+    [[nodiscard]] qint64 msSinceBackup() const;
+    /// The tab's text is still only in its backup: not read yet, or being read.
+    [[nodiscard]] bool backupPending() const noexcept { return pendingBackup_.has_value(); }
     [[nodiscard]] bool isReadOnly() const;
     void setReadOnly(bool readOnly);
 
@@ -161,6 +193,8 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    /// Reads `source` on a worker, for a document that is `path` (empty: a new one).
+    void startLoad(const QString& source, const QString& path, std::optional<Encoding> forced);
     void installHighlighter();
     void showPreview(const QString& text);
     void endPreview();
@@ -188,6 +222,11 @@ private:
     bool showSpaces_ = false;
     bool showEols_ = false;
     QMetaObject::Connection modificationConnection_;
+    QMetaObject::Connection contentsConnection_;
+    std::optional<Backup> pendingBackup_; ///< the text comes from this backup
+    QString backupPath_;
+    bool backupDirty_ = false;
+    QElapsedTimer backupClock_;
 
     Encoding encoding_ = Encoding::Utf8;
     Eol eol_ = nativeEol();

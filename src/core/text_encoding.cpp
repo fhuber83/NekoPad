@@ -247,7 +247,11 @@ DecodedText decode(QByteArrayView bytes, std::optional<Encoding> forced) {
     case Encoding::Utf8:
     case Encoding::Utf8Bom: {
         const QByteArrayView body = skipBom(sizeof kUtf8Bom, Encoding::Utf8Bom);
-        result.text = QString::fromUtf8(body);
+        // ConvertInitialBom: a U+FEFF left after the file's BOM is text (fromUtf8 would
+        // drop it as a second BOM).
+        QStringDecoder decoder(
+            QStringConverter::Utf8, QStringConverter::Flag::Stateless | QStringConverter::Flag::ConvertInitialBom);
+        result.text = decoder.decode(body);
         break;
     }
     case Encoding::Utf16LeBom:
@@ -256,7 +260,7 @@ DecodedText decode(QByteArrayView bytes, std::optional<Encoding> forced) {
         const QByteArrayView body = skipBom(2, bom);
         QStringDecoder decoder(
             bom == Encoding::Utf16LeBom ? QStringConverter::Utf16LE : QStringConverter::Utf16BE,
-            QStringConverter::Flag::Stateless);
+            QStringConverter::Flag::Stateless | QStringConverter::Flag::ConvertInitialBom);
         result.text = decoder.decode(body);
         break;
     }

@@ -79,6 +79,8 @@ add_library(nekopad_core STATIC
     src/core/language.cpp
     src/core/line_ops.hpp
     src/core/line_ops.cpp
+    src/core/backup_store.hpp
+    src/core/backup_store.cpp
 )
 target_include_directories(nekopad_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(nekopad_core PUBLIC Qt6::Core)

@@ -1,5 +1,6 @@
 #include "ui/editor_tab.hpp"
 
+#include "core/backup_store.hpp"
 #include "core/line_ops.hpp"
 #include "ui/syntax_highlighter.hpp"
 
@@ -104,6 +105,8 @@ EditorTab::EditorTab(QWidget* parent)
 
     modificationConnection_ =
         connect(editor_->document(), &QTextDocument::modificationChanged, this, &EditorTab::infoChanged);
+    contentsConnection_ =
+        connect(editor_->document(), &QTextDocument::contentsChanged, this, [this] { backupDirty_ = true; });
     connect(editor_, &ed::CodeEditor::documentReplaced, this, &EditorTab::documentReplaced);
     // CodeEditor takes EditorDefaults' font when it changes; keep the zoom on top of it.
     connect(&ed::EditorDefaults::instance(), &ed::EditorDefaults::fontChanged, this, [this] { setZoom(zoom_); });
@@ -129,13 +132,38 @@ void EditorTab::setPendingFile(const QString& path) {
     emit infoChanged();
 }
 
+void EditorTab::setPendingBackup(const Backup& backup) {
+    pendingBackup_ = backup;
+    path_ = backup.filePath;
+    backupPath_ = backup.backupPath;
+    // Known before the text is: the session and the status bar ask.
+    encoding_ = backup.encoding;
+    eol_ = backup.eol;
+    knownModified_ = backup.fileModified;
+    state_ = LoadState::Pending;
+    if (!languageChosen_) {
+        language_ = &detectLanguage(path_, {});
+    }
+    emit infoChanged();
+}
+
 void EditorTab::ensureLoaded() {
-    if (state_ == LoadState::Pending) {
+    if (state_ != LoadState::Pending) {
+        return;
+    }
+    if (pendingBackup_) {
+        startLoad(pendingBackup_->backupPath, path_, std::nullopt);
+    } else {
         load(path_);
     }
 }
 
 void EditorTab::load(const QString& path, std::optional<Encoding> forced) {
+    pendingBackup_.reset();
+    startLoad(path, path, forced);
+}
+
+void EditorTab::startLoad(const QString& source, const QString& path, std::optional<Encoding> forced) {
     endPreview();
     path_ = path;
     state_ = LoadState::Loading;
@@ -150,9 +178,10 @@ void EditorTab::load(const QString& path, std::optional<Encoding> forced) {
     const bool dark = dark_;
     const Language* chosen = languageChosen_ ? language_ : nullptr;
     QThread* const uiThread = thread();
+    const bool fromBackup = pendingBackup_.has_value();
     QThreadPool::globalInstance()->start([=] {
         Prepared p;
-        p.file = loadTextFile(path, forced);
+        p.file = fromBackup ? BackupStore::read(source) : loadTextFile(source, forced);
         p.dark = dark;
         const QString& text = p.file.decoded.text;
         if (p.file.ok && text.size() > kPrebuildThreshold) {
@@ -246,6 +275,13 @@ void EditorTab::applyLoaded(const QString& path, const Prepared& prepared) {
     looksBinary_ = decoded.looksBinary;
     fileSize_ = file.size;
     knownModified_ = file.modified;
+    if (pendingBackup_) {
+        // The backup's own encoding says nothing: the document keeps its file's.
+        encoding_ = pendingBackup_->encoding;
+        eol_ = pendingBackup_->eol;
+        mixedEols_ = false;
+        knownModified_ = pendingBackup_->fileModified;
+    }
     delete highlighter_;
 
     if (QTextDocument* doc = prepared.document) {
@@ -280,14 +316,21 @@ void EditorTab::applyLoaded(const QString& path, const Prepared& prepared) {
 
 void EditorTab::documentReplaced() {
     disconnect(modificationConnection_);
+    disconnect(contentsConnection_);
     modificationConnection_ =
         connect(editor_->document(), &QTextDocument::modificationChanged, this, &EditorTab::infoChanged);
+    contentsConnection_ =
+        connect(editor_->document(), &QTextDocument::contentsChanged, this, [this] { backupDirty_ = true; });
     applyTextOptions();
 }
 
 void EditorTab::finishLoading() {
     state_ = LoadState::Ready;
-    editor_->document()->setModified(false);
+    // Text from a backup is unsaved changes; the backup holds it as it is now.
+    const bool fromBackup = pendingBackup_.has_value();
+    pendingBackup_.reset();
+    editor_->document()->setModified(fromBackup);
+    setBackupDirty(false);
     if (pendingCursor_) {
         goToLine(pendingCursor_->first, pendingCursor_->second);
         pendingCursor_.reset();
@@ -298,6 +341,21 @@ void EditorTab::finishLoading() {
 
 SaveResult EditorTab::save() {
     return saveAs(path_);
+}
+
+void EditorTab::setBackupDirty(bool dirty) {
+    backupDirty_ = dirty;
+    if (!dirty) {
+        backupClock_.start();
+    }
+}
+
+qint64 EditorTab::msSinceBackup() const {
+    return backupClock_.isValid() ? backupClock_.elapsed() : -1;
+}
+
+QString EditorTab::text() const {
+    return documentText(editor_->document());
 }
 
 SaveResult EditorTab::saveAs(const QString& path) {
@@ -369,7 +427,11 @@ void EditorTab::installHighlighter() {
 }
 
 bool EditorTab::isModified() const {
-    // While a file loads, the editor shows a preview, not an edit.
+    // While a file loads, the editor shows a preview, not an edit. Text still in a backup
+    // is unsaved, read or not.
+    if (pendingBackup_) {
+        return true;
+    }
     return state_ == LoadState::Ready && editor_->document()->isModified();
 }
 

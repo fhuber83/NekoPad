@@ -17,6 +17,10 @@ and Qt 6 Widgets, for Windows, Linux and macOS. The editor control and the look 
   right, reopen closed tab (Ctrl+Shift+T), recent files, drag & drop, middle-click
   closes, double-click on the empty tab bar opens a new document. Files changed by other
   programs are offered for reloading.
+- **Unsaved changes survive restarts**, as in Notepad++: new documents and modified files
+  are copied to backups every 7 seconds and on exit, so closing Neko Pad does not ask
+  about them, and the next start (even after a crash) shows them again, still unsaved.
+  Settings → Remember Unsaved Changes turns it off.
 - **Encodings**: UTF-8, UTF-8 BOM, UTF-16 LE / BE BOM and Latin-1, detected on open and
   written back as found. Convert, or reload in another encoding. **Line endings**:
   CR LF / LF / CR detected (mixed endings shown) and converted.
@@ -49,7 +53,8 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 ```
 
 Options: `--new-instance` opens a second window instead of handing files to the running
-one; `--no-session` skips the last session's files. `NEKOPAD_CPU_ARCH` picks the target
+one; `--no-session` neither reopens the last session nor replaces it (its unsaved
+changes stay for the next normal start). `NEKOPAD_CPU_ARCH` picks the target
 CPU (`x86-64-v2` by default, `x86-64-v3`, `x86-64-v4`, `native`, `none`); `NEKOPAD_LTO`
 turns link-time optimization off.
 
@@ -79,6 +84,7 @@ To see what opening a large file costs, step by step:
 | `src/core/text_file` | Loading (memory-mapped) and atomic saving (`QSaveFile`) |
 | `src/core/language` | The language table: recognition and what the highlighter needs |
 | `src/core/line_ops` | The Edit menu's line operations, as pure functions |
+| `src/core/backup_store` | Backups of unsaved documents, written in order on a thread of their own |
 | `src/ui/syntax_highlighter` | One scanner per language family: code, markup, INI, diff |
 | `src/ui/editor_tab` | A document: `CodeEditor` + `EditorFindBar`, loading and building on a worker |
 | `src/ui/main_window` | Tabs, menus, tool bar, status bar, session, files changed on disk |

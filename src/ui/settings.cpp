@@ -4,6 +4,7 @@
 
 #include <QDir>
 #include <QSettings>
+#include <QStandardPaths>
 
 namespace neko::pad::ui {
 
@@ -17,6 +18,7 @@ constexpr auto kShowWhitespace = "editor/show_whitespace";
 constexpr auto kShowLineEndings = "editor/show_line_endings";
 constexpr auto kZoom = "editor/zoom";
 constexpr auto kRestoreSession = "general/restore_session";
+constexpr auto kBackupUnsaved = "general/backup_unsaved";
 constexpr auto kSingleInstance = "general/single_instance";
 constexpr auto kRecentFiles = "general/recent_files";
 constexpr auto kLastDirectory = "general/last_directory";
@@ -25,6 +27,31 @@ constexpr auto kState = "window/state";
 
 [[nodiscard]] QString key(const char* k) {
     return QString::fromLatin1(k);
+}
+
+[[nodiscard]] QString eolId(Eol eol) {
+    switch (eol) {
+    case Eol::CrLf:
+        return QStringLiteral("crlf");
+    case Eol::Cr:
+        return QStringLiteral("cr");
+    case Eol::Lf:
+        break;
+    }
+    return QStringLiteral("lf");
+}
+
+[[nodiscard]] Eol eolFromId(const QString& id) {
+    if (id == u"crlf") {
+        return Eol::CrLf;
+    }
+    if (id == u"cr") {
+        return Eol::Cr;
+    }
+    if (id == u"lf") {
+        return Eol::Lf;
+    }
+    return nativeEol();
 }
 
 } // namespace
@@ -70,6 +97,17 @@ bool restoreSession() {
 }
 void setRestoreSession(bool enabled) {
     QSettings().setValue(key(kRestoreSession), enabled);
+}
+
+bool backupUnsaved() {
+    return QSettings().value(key(kBackupUnsaved), true).toBool();
+}
+void setBackupUnsaved(bool enabled) {
+    QSettings().setValue(key(kBackupUnsaved), enabled);
+}
+
+QString backupDirectory() {
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("backup"));
 }
 
 bool singleInstance() {
@@ -123,7 +161,14 @@ QList<SessionFile> sessionFiles() {
         f.line = s.value(QStringLiteral("line")).toInt();
         f.column = s.value(QStringLiteral("column")).toInt();
         f.languageId = s.value(QStringLiteral("language")).toString();
-        if (!f.path.isEmpty()) {
+        f.untitledName = s.value(QStringLiteral("untitled")).toString();
+        f.backup = s.value(QStringLiteral("backup")).toString();
+        if (!f.backup.isEmpty()) {
+            f.encoding = encodingFromId(s.value(QStringLiteral("encoding")).toString()).value_or(Encoding::Utf8);
+            f.eol = eolFromId(s.value(QStringLiteral("eol")).toString());
+            f.fileModified = QDateTime::fromMSecsSinceEpoch(s.value(QStringLiteral("file_modified"), 0).toLongLong());
+        }
+        if (!f.path.isEmpty() || !f.backup.isEmpty()) {
             files << f;
         }
     }
@@ -146,6 +191,17 @@ void setSession(const QList<SessionFile>& files, int currentIndex) {
         s.setValue(QStringLiteral("column"), files[i].column);
         if (!files[i].languageId.isEmpty()) {
             s.setValue(QStringLiteral("language"), files[i].languageId);
+        }
+        if (!files[i].untitledName.isEmpty()) {
+            s.setValue(QStringLiteral("untitled"), files[i].untitledName);
+        }
+        if (!files[i].backup.isEmpty()) {
+            s.setValue(QStringLiteral("backup"), files[i].backup);
+            s.setValue(QStringLiteral("encoding"), encodingId(files[i].encoding));
+            s.setValue(QStringLiteral("eol"), eolId(files[i].eol));
+            if (files[i].fileModified.isValid()) {
+                s.setValue(QStringLiteral("file_modified"), files[i].fileModified.toMSecsSinceEpoch());
+            }
         }
     }
     s.endArray();

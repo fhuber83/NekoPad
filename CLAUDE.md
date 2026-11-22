@@ -50,6 +50,16 @@ app without touching the real settings or meeting a running instance:
 - **Never lose bytes.** Save through `saveTextFile` (`QSaveFile`); take the text with
   `documentText()` (raw text), not `toPlainText()`, which turns non-breaking spaces into
   spaces. Keep the file's encoding and line endings unless the user converts.
+- **Unsaved changes survive restarts** (Notepad++'s session snapshot). Every
+  `MainWindow::kBackupIntervalMs` the window copies each modified tab's text to a
+  `BackupStore` file (`<AppData>/backup`, UTF-8 BOM, `\n`, written on its own
+  single-thread pool in order) and writes the session, which names the backup together
+  with the encoding, line endings and file time to restore. On exit nothing is asked about
+  what is backed up. A restored tab reads its backup lazily (`setPendingBackup`) and counts
+  as modified even before that. Anything that saves or discards a tab's text must call
+  `discardBackup`, and anything that needs the text of a tab that may not be read yet
+  must call `ensureReady` first. `--no-session` (`setUseSession(false)`) neither reads
+  nor writes the session or the backups.
 - **Editing behaviour belongs in NekoControls**, not here: `CodeEditor`, `EditorFindBar`,
   `MarkdownHighlighter`. To change NekoControls alongside, configure with
   `-DFETCHCONTENT_SOURCE_DIR_NEKO_CONTROLS=/abs/path/to/NekoControls`; release it there
@@ -84,6 +94,7 @@ app without touching the real settings or meeting a running instance:
 - `QSyntaxHighlighter` keeps formats for every block; files over
   `EditorTab::kHighlightLimit` (32 MiB) are shown plain.
 - Not built yet: Find in Files, bracket matching (needs an extra-selection hook in
-  `CodeEditor`), split view, macros, code folding, auto-completion, backup of unsaved
-  new documents across restarts, translations (NekoControls brings its own),
-  packaging (AppImage, Windows installer, macOS bundle signing).
+  `CodeEditor`), split view, macros, code folding, auto-completion, translations
+  (NekoControls brings its own), packaging (AppImage, Windows installer, macOS bundle
+  signing). Two windows (`--new-instance`) share one session and so overwrite each
+  other's; the backups survive, but only the last window's session names them.

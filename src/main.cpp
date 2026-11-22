@@ -65,6 +65,9 @@ int main(int argc, char* argv[]) {
     neko::pad::ui::applyStoredEditorSettings();
 
     neko::pad::ui::MainWindow window;
+    // --no-session neither reads the last session nor replaces it (nor its backups of
+    // unsaved changes).
+    window.setUseSession(!parser.isSet(noSession));
     if (!parser.isSet(noSession) && neko::pad::ui::settings::restoreSession()) {
         window.restoreSession();
     }

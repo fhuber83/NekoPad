@@ -1,5 +1,6 @@
 #include "ui/main_window.hpp"
 
+#include "core/backup_store.hpp"
 #include "core/language.hpp"
 #include "core/line_ops.hpp"
 #include "core/text_file.hpp"
@@ -21,6 +22,7 @@
 #include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
@@ -84,8 +86,10 @@ constexpr qint64 kAskBeforeOpening = 512LL * 1024 * 1024;
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent, const QString& backupDirectory)
+    : QMainWindow(parent),
+      backups_(
+          std::make_unique<BackupStore>(backupDirectory.isEmpty() ? settings::backupDirectory() : backupDirectory)) {
     setWindowIcon(appIcon());
     setAcceptDrops(true);
     zoom_ = settings::zoom();
@@ -119,6 +123,10 @@ MainWindow::MainWindow(QWidget* parent)
     changeTimer_->setSingleShot(true);
     changeTimer_->setInterval(250);
     connect(changeTimer_, &QTimer::timeout, this, &MainWindow::checkChangedFiles);
+    backupTimer_ = new QTimer(this);
+    backupTimer_->setInterval(kBackupIntervalMs);
+    connect(backupTimer_, &QTimer::timeout, this, &MainWindow::backupNow);
+    backupTimer_->start();
 
     buildActions();
     buildMenus();
@@ -553,7 +561,16 @@ void MainWindow::buildActions() {
     QAction* session = makeAction(QStringLiteral("restore-session"), tr("&Remember Open Files"));
     session->setCheckable(true);
     session->setChecked(settings::restoreSession());
-    connect(session, &QAction::triggered, this, [](bool on) { settings::setRestoreSession(on); });
+    QAction* backup = makeAction(QStringLiteral("backup-unsaved"), tr("Remember &Unsaved Changes"));
+    backup->setCheckable(true);
+    backup->setChecked(settings::backupUnsaved());
+    backup->setEnabled(settings::restoreSession());
+    backup->setToolTip(tr("Keep new documents and unsaved changes when Neko Pad closes, without asking"));
+    connect(backup, &QAction::triggered, this, [](bool on) { settings::setBackupUnsaved(on); });
+    connect(session, &QAction::triggered, this, [backup](bool on) {
+        settings::setRestoreSession(on);
+        backup->setEnabled(on);
+    });
     QAction* single = makeAction(QStringLiteral("single-instance"), tr("Open Files in the &Running Window"));
     single->setCheckable(true);
     single->setChecked(settings::singleInstance());
@@ -704,6 +721,7 @@ void MainWindow::buildMenus() {
     settingsMenu->addAction(a("font"));
     settingsMenu->addSeparator();
     settingsMenu->addAction(a("restore-session"));
+    settingsMenu->addAction(a("backup-unsaved"));
     settingsMenu->addAction(a("single-instance"));
 
     QMenu* help = bar->addMenu(tr("&Help"));
@@ -943,6 +961,14 @@ void MainWindow::tabLoaded(EditorTab* tab) {
         return;
     }
     watch(tab);
+    if (!tab->isUntitled() && tab->knownModified().isValid()) {
+        // Changes restored from a backup were made to the file as it was then.
+        const QFileInfo info(tab->filePath());
+        if (!info.exists() || info.lastModified() != tab->knownModified()) {
+            changedOnDisk_.insert(tab->filePath());
+            changeTimer_->start();
+        }
+    }
     if (tab == currentTab()) {
         if (tab->looksBinary()) {
             statusBar()->showMessage(tr("%1 looks like a binary file.").arg(tab->displayName()), 5000);
@@ -1158,6 +1184,9 @@ void MainWindow::openFileDialog() {
 }
 
 bool MainWindow::saveTab(EditorTab* tab) {
+    if (!ensureReady(tab)) {
+        return false;
+    }
     if (tab->isUntitled()) {
         return saveTabAs(tab);
     }
@@ -1185,11 +1214,15 @@ bool MainWindow::saveTab(EditorTab* tab) {
         return false;
     }
     watch(tab); // an atomic save replaces the file: watch the new one
+    discardBackup(tab);
     statusBar()->showMessage(tr("Saved %1").arg(tab->displayName()), 3000);
     return true;
 }
 
 bool MainWindow::saveTabAs(EditorTab* tab) {
+    if (!ensureReady(tab)) {
+        return false;
+    }
     QString suggestion;
     if (tab->isUntitled()) {
         suggestion = QDir(settings::lastDirectory()).filePath(tab->displayName());
@@ -1213,6 +1246,7 @@ bool MainWindow::saveTabAs(EditorTab* tab) {
         unwatch(oldPath);
     }
     watch(tab);
+    discardBackup(tab);
     settings::addRecentFile(normalizedPath(path));
     settings::setLastDirectory(QFileInfo(path).absolutePath());
     return true;
@@ -1236,6 +1270,10 @@ bool MainWindow::closeTab(EditorTab* tab, bool force) {
     }
     if (!force && tab->isModified()) {
         tabs_->setCurrentIndex(index);
+        const QPointer<EditorTab> guard(tab);
+        if (!ensureReady(tab)) {
+            return !guard || tabs_->indexOf(tab) < 0; // closed as it failed to load
+        }
         const auto answer = QMessageBox::question(
             this,
             tr("Close"),
@@ -1247,6 +1285,9 @@ bool MainWindow::closeTab(EditorTab* tab, bool force) {
         }
     }
     const QString path = tab->filePath();
+    if (tab->loadState() != EditorTab::LoadState::Failed) {
+        discardBackup(tab); // a backup that could not be read stays for the next start
+    }
     tabs_->removeTab(tabs_->indexOf(tab));
     if (!path.isEmpty()) {
         unwatch(path);
@@ -1464,8 +1505,12 @@ void MainWindow::restoreSession() {
     int index = 0;
     for (const settings::SessionFile& f : files) {
         const int i = index++;
-        if (!QFileInfo::exists(f.path) || tabForPath(f.path)) {
+        const bool fromBackup = !f.backup.isEmpty() && QFileInfo::exists(f.backup);
+        if (!f.path.isEmpty() && tabForPath(f.path)) {
             continue;
+        }
+        if (!fromBackup && (f.path.isEmpty() || !QFileInfo::exists(f.path))) {
+            continue; // a new document whose backup is gone, or a file that is gone
         }
         EditorTab* tab = createTab();
         if (!f.languageId.isEmpty()) {
@@ -1473,7 +1518,15 @@ void MainWindow::restoreSession() {
                 tab->setLanguage(*l);
             }
         }
-        tab->setPendingFile(f.path);
+        if (f.path.isEmpty()) {
+            tab->setUntitledName(f.untitledName.isEmpty() ? nextUntitledName() : f.untitledName);
+        }
+        if (fromBackup) {
+            // Even if the file is gone: the unsaved text is not.
+            tab->setPendingBackup({f.backup, f.path, f.encoding, f.eol, f.fileModified});
+        } else {
+            tab->setPendingFile(f.path);
+        }
         tab->goToLine(f.line, f.column);
         // Adding a tab makes the first one current, which reads it: hold that until the
         // session's current tab is known.
@@ -1489,33 +1542,147 @@ void MainWindow::restoreSession() {
     }
 }
 
-void MainWindow::saveSession() const {
+QList<settings::SessionFile> MainWindow::sessionEntries(int* current) const {
     QList<settings::SessionFile> files;
-    int current = 0;
+    *current = 0;
     for (int i = 0; i < tabCount(); ++i) {
         const EditorTab* tab = tabAt(i);
-        if (tab->isUntitled()) {
+        const bool backedUp = !tab->backupPath().isEmpty();
+        if (tab->isUntitled() && !backedUp) {
             continue;
         }
         if (tab == currentTab()) {
-            current = static_cast<int>(files.size());
+            *current = static_cast<int>(files.size());
         }
         const auto [line, column] = tab->sessionCursor();
-        files << settings::SessionFile{
-            tab->filePath(), line, column, tab->languageChosen() ? tab->language().id : QString()};
+        settings::SessionFile f;
+        f.path = tab->filePath();
+        f.line = line;
+        f.column = column;
+        f.languageId = tab->languageChosen() ? tab->language().id : QString();
+        if (tab->isUntitled()) {
+            f.untitledName = tab->untitledName();
+        }
+        if (backedUp) {
+            f.backup = tab->backupPath();
+            f.encoding = tab->encoding();
+            f.eol = tab->eol();
+            f.fileModified = tab->isUntitled() ? QDateTime() : tab->knownModified();
+        }
+        files << f;
     }
+    return files;
+}
+
+void MainWindow::saveSession() {
+    int current = 0;
+    QList<settings::SessionFile> files = sessionEntries(&current);
     settings::setSession(files, current);
+    lastSession_ = std::move(files);
+    lastSessionCurrent_ = current;
+}
+
+// ---- Unsaved changes across restarts ---------------------------------------------------------
+
+bool MainWindow::keepsUnsavedChanges() const {
+    return useSession_ && settings::restoreSession() && settings::backupUnsaved();
+}
+
+bool MainWindow::ensureReady(EditorTab* tab) {
+    const QPointer<EditorTab> guard(tab);
+    tab->ensureLoaded();
+    if (tab->loadState() == EditorTab::LoadState::Loading) {
+        QEventLoop loop;
+        connect(tab, &EditorTab::loaded, &loop, &QEventLoop::quit);
+        connect(tab, &QObject::destroyed, &loop, &QEventLoop::quit);
+        loop.exec(QEventLoop::ExcludeUserInputEvents);
+    }
+    return guard && tabs_->indexOf(tab) >= 0 && tab->loadState() == EditorTab::LoadState::Ready;
+}
+
+void MainWindow::backupTab(EditorTab* tab, bool now) {
+    if (tab->loadState() != EditorTab::LoadState::Ready) {
+        return; // its text is not here yet: whatever backup it has is what it is
+    }
+    // An empty new document is nothing to keep, modified or not.
+    const bool unsaved = tab->isModified() && !(tab->isUntitled() && tab->editor()->document()->isEmpty());
+    if (!unsaved) {
+        discardBackup(tab);
+        return;
+    }
+    if (tab->backupPath().isEmpty()) {
+        tab->setBackupPath(backups_->newPath(tab->displayName()));
+    } else if (backups_->failed(tab->backupPath())) {
+        // Try again.
+    } else if (!tab->backupDirty()) {
+        return;
+    } else if (
+        !now && tab->editor()->document()->characterCount() > kLargeBackupChars && tab->msSinceBackup() >= 0 &&
+        tab->msSinceBackup() < kLargeBackupIntervalMs) {
+        return;
+    }
+    backups_->write(tab->backupPath(), tab->text());
+    tab->setBackupDirty(false);
+}
+
+void MainWindow::discardBackup(EditorTab* tab) {
+    if (const QString path = tab->backupPath(); !path.isEmpty()) {
+        backups_->remove(path);
+        tab->setBackupPath({});
+    }
+}
+
+void MainWindow::backupNow() {
+    if (!useSession_ || !settings::restoreSession()) {
+        return;
+    }
+    if (keepsUnsavedChanges()) {
+        for (int i = 0; i < tabCount(); ++i) {
+            backupTab(tabAt(i), false);
+        }
+    }
+    int current = 0;
+    QList<settings::SessionFile> files = sessionEntries(&current);
+    if (files != lastSession_ || current != lastSessionCurrent_) {
+        settings::setSession(files, current);
+        lastSession_ = std::move(files);
+        lastSessionCurrent_ = current;
+    }
 }
 
 // ---- Events ----------------------------------------------------------------------------------
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    const bool keep = keepsUnsavedChanges();
+    if (keep) {
+        for (int i = 0; i < tabCount(); ++i) {
+            backupTab(tabAt(i), true);
+        }
+        backups_->waitForDone();
+    }
     for (int i = 0; i < tabCount(); ++i) {
         EditorTab* tab = tabAt(i);
         if (!tab->isModified()) {
             continue;
         }
+        if (keep) {
+            const bool empty = tab->loadState() == EditorTab::LoadState::Ready && tab->isUntitled() &&
+                               tab->editor()->document()->isEmpty();
+            const bool safe = !tab->backupPath().isEmpty() && !backups_->failed(tab->backupPath());
+            if (empty || safe) {
+                continue; // nothing to lose, or it is kept for the next start
+            }
+        }
         tabs_->setCurrentIndex(i);
+        const QPointer<EditorTab> guard(tab);
+        if (!ensureReady(tab)) {
+            if (guard && tabs_->indexOf(tab) >= 0) {
+                event->ignore();
+                return;
+            }
+            --i; // it could not be read and was closed (its backup stays)
+            continue;
+        }
         const auto answer = QMessageBox::question(
             this,
             tr("Exit"),
@@ -1528,11 +1695,21 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         }
     }
     closing_ = true;
-    if (settings::restoreSession()) {
-        saveSession();
-    } else {
-        settings::setSession({}, 0);
+    backupTimer_->stop();
+    if (useSession_) {
+        if (!keep) {
+            // Asked about and saved or discarded: no backup is wanted any more.
+            for (int i = 0; i < tabCount(); ++i) {
+                discardBackup(tabAt(i));
+            }
+        }
+        if (settings::restoreSession()) {
+            saveSession();
+        } else {
+            settings::setSession({}, 0);
+        }
     }
+    backups_->waitForDone();
     settings::setWindowGeometry(saveGeometry(), saveState());
     event->accept();
 }

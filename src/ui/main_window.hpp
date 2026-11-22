@@ -1,10 +1,13 @@
 #pragma once
 
 #include "core/text_encoding.hpp"
+#include "ui/settings.hpp"
 
 #include <QHash>
 #include <QMainWindow>
 #include <QSet>
+
+#include <memory>
 
 class QAction;
 class QActionGroup;
@@ -19,6 +22,10 @@ namespace neko::theme {
 class ResponsiveToolBar;
 }
 
+namespace neko::pad {
+class BackupStore;
+}
+
 namespace neko::pad::ui {
 
 class EditorTab;
@@ -30,12 +37,36 @@ class EditorTab;
 /// Files open on worker threads and appear as soon as they are read; tabs of a
 /// restored session read their file only when they are first shown. Files changed by
 /// other programs are noticed and offered for reloading.
+///
+/// Unsaved changes survive a restart, as in Notepad++: every kBackupInterval the text of
+/// each modified tab goes to a backup file (BackupStore, on a thread of its own) and the
+/// session is written, so even a crash keeps them. Closing the window then does not ask
+/// about them; the next start shows them again, still unsaved.
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    /// How often unsaved changes are copied to their backups (Notepad++: 7 s).
+    static constexpr int kBackupIntervalMs = 7000;
+    /// Taking the text of a document costs the UI thread about 1 ms per million
+    /// characters: larger ones are backed up only every kLargeBackupIntervalMs (and on exit).
+    static constexpr int kLargeBackupChars = 8 * 1024 * 1024;
+    static constexpr int kLargeBackupIntervalMs = 60000;
+
+    /// `backupDirectory`: where unsaved changes go; empty: settings::backupDirectory().
+    explicit MainWindow(QWidget* parent = nullptr, const QString& backupDirectory = {});
     ~MainWindow() override;
+
+    /// Whether the window reads and writes the session (and so keeps unsaved changes
+    /// across restarts). Off for --no-session: such a window leaves the last session --
+    /// and its backups -- as they are. On by default.
+    void setUseSession(bool use) { useSession_ = use; }
+    /// Unsaved changes are kept across restarts instead of asked about on exit.
+    [[nodiscard]] bool keepsUnsavedChanges() const;
+    /// Copies the unsaved changes of every tab to their backups now (queued), drops the
+    /// backups of tabs that have none any more, and writes the session.
+    void backupNow();
+    [[nodiscard]] BackupStore& backups() const noexcept { return *backups_; }
 
     /// Opens each file (or switches to it if it is open already); asynchronous. The
     /// last one becomes the current tab. A `path:line` form jumps to that line.
@@ -45,7 +76,7 @@ public:
 
     /// Opens the files of the last session (lazily: only the current one is read).
     void restoreSession();
-    void saveSession() const;
+    void saveSession();
 
     /// A new, empty "new N" document.
     EditorTab* newDocument();
@@ -111,6 +142,15 @@ private:
     void setZoom(int zoom);
     void showAbout();
 
+    /// Reads `tab`'s text now if it is not there yet, waiting for it. False if that failed.
+    bool ensureReady(EditorTab* tab);
+    /// Queues writing `tab`'s backup if it has unsaved changes that its backup lacks, or
+    /// removing the backup if it has none. `now`: even a large document right away.
+    void backupTab(EditorTab* tab, bool now);
+    /// Removes `tab`'s backup: its changes are saved or discarded.
+    void discardBackup(EditorTab* tab);
+    [[nodiscard]] QList<settings::SessionFile> sessionEntries(int* current) const;
+
     void watch(EditorTab* tab);
     void unwatch(const QString& path);
     void fileChangedOnDisk(const QString& path);
@@ -146,6 +186,13 @@ private:
     QSet<QString> changedOnDisk_; ///< paths waiting to be offered for reloading
     QTimer* changeTimer_ = nullptr;
     bool checkingChanges_ = false;
+
+    std::unique_ptr<BackupStore> backups_;
+    QTimer* backupTimer_ = nullptr;
+    bool useSession_ = true;
+    /// The session as last written, so that the periodic write skips an unchanged one.
+    QList<settings::SessionFile> lastSession_;
+    int lastSessionCurrent_ = -1;
 
     QStringList closedPaths_; ///< for Reopen Closed Tab, latest last
     int zoom_ = 0;
