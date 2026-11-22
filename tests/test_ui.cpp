@@ -33,6 +33,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QThread>
 #include <QtTest>
 
 namespace th = neko::theme;
@@ -362,6 +363,65 @@ private slots:
         window.tabWidget()->setCurrentIndex(0);
         QTRY_COMPARE(window.tabAt(0)->loadState(), EditorTab::LoadState::Ready);
         QCOMPARE(window.tabAt(0)->cursorLineColumn(), std::make_pair(2, 1));
+    }
+
+    /// A file over EditorTab::kPrebuildThreshold is built and highlighted on the worker and
+    /// adopted whole: everything that follows the document must follow the new one.
+    void testLargeFileIsBuiltOffTheUiThread() {
+        const QString path = dir_.filePath(QStringLiteral("large.py"));
+        QByteArray content;
+        while (content.size() <= EditorTab::kPrebuildThreshold * 2) {
+            content += "def f(x):  # comment\n    return x + 42\n";
+        }
+        writeFile(path, content);
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openFiles({path});
+        EditorTab* tab = window.currentTab();
+        tab->setShowWhitespace(true, false);
+        QTRY_COMPARE(tab->loadState(), EditorTab::LoadState::Ready);
+        neko::editor::CodeEditor* editor = tab->editor();
+        QCOMPARE(editor->toPlainText().toUtf8(), content);
+        QCOMPARE(editor->document()->parent(), editor); // adopted
+        QCOMPARE(editor->document()->thread(), QThread::currentThread());
+        QCOMPARE(tab->language().id, QStringLiteral("python"));
+        QVERIFY(!tab->isModified());
+        QVERIFY(!editor->isReadOnly()); // the preview's read-only is over
+
+        // Highlighted on the worker: the formats are there without a pass here.
+        auto* highlighter = dynamic_cast<neko::pad::ui::SyntaxHighlighter*>(tab->highlighter());
+        QVERIFY(highlighter);
+        QCOMPARE(highlighter->parent(), editor->document());
+        QCOMPARE(formatAt(editor->document(), 0, 0).foreground(), highlighter->formats().keyword.foreground());
+        QCOMPARE(formatAt(editor->document(), 0, 11).foreground(), highlighter->formats().comment.foreground());
+
+        // The view option set while it loaded applies to the adopted document.
+        QVERIFY(editor->document()->defaultTextOption().flags().testFlag(QTextOption::ShowTabsAndSpaces));
+
+        // Edits of the new document reach the tab, the window and the Find bar.
+        editor->moveCursor(QTextCursor::Start);
+        editor->insertPlainText(QStringLiteral("# head\n"));
+        QVERIFY(tab->isModified());
+        QVERIFY(window.isWindowModified());
+        window.action(QStringLiteral("find"))->trigger();
+        tab->findBar()->findField()->setText(QStringLiteral("# head"));
+        QTRY_COMPARE(tab->findBar()->matchCount(), 1);
+        editor->moveCursor(QTextCursor::End);
+        editor->insertPlainText(QStringLiteral("# head\n"));
+        QTRY_COMPARE(tab->findBar()->matchCount(), 2);
+
+        // Saved as it is; reloading adopts a second document in place of the first.
+        QVERIFY(window.saveTab(tab));
+        QVERIFY(!tab->isModified());
+        const QByteArray saved = readFile(path);
+        QVERIFY(saved.startsWith("# head\ndef f(x):"));
+        QPointer<QTextDocument> first = editor->document();
+        tab->reload();
+        QTRY_COMPARE(tab->loadState(), EditorTab::LoadState::Ready);
+        QTRY_VERIFY(first.isNull()); // the editor deleted the document it gave up
+        QCOMPARE(editor->toPlainText().toUtf8(), saved);
+        QVERIFY(!tab->isModified());
     }
 
     void testReloadWithEncoding() {

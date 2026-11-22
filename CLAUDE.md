@@ -38,8 +38,12 @@ app without touching the real settings or meeting a running instance:
   (`SOURCE_SUBDIR` trick in `CMakeLists.txt`), never NekoControls' top level: that pulls
   in Qt WebEngine, which would cost start-up time and a heavy build dependency.
 - **Nothing slow on the UI thread.** Files are read and decoded on a worker
-  (`EditorTab::load`, `QThreadPool`); large texts stream into the editor in slices
-  (`EditorTab::appendSlice`); session tabs read their file when first shown. The
+  (`EditorTab::load`, `QThreadPool`). A large text's `QTextDocument` is built *and
+  highlighted* on that worker too, with the editor's font and text options (so adopting
+  it costs one layout, not three), and the UI thread only adopts it
+  (`CodeEditor::replaceDocument`, NekoControls); a preview of its start shows meanwhile.
+  Session tabs read their file when first shown. Highlighters are the document's
+  children, so they move and die with it. The
   highlighter is a hand-written scanner (`ui/syntax_highlighter`): no
   `QRegularExpression` per line, no allocation per token, keyword lookup by bisection
   (`containsWord`).
@@ -73,11 +77,13 @@ app without touching the real settings or meeting a running instance:
 
 ## Known limits and next steps
 
-- **Building the document is the cost of a big file** (~70 ms per MiB of short lines,
-  in `QTextDocument`). It could be built on a worker and adopted with `setDocument()`
-  (measured: 57 ms on the UI thread for 10 MiB instead of ~700), but `CodeEditor` and
-  `EditorFindBar` connect to their document in their constructors. That needs a change
-  in NekoControls first (re-connect on a document change).
+- **This branch needs NekoControls with `CodeEditor::replaceDocument()`** (branch
+  `feat/replace-document` there, not released yet): configure with
+  `-DFETCHCONTENT_SOURCE_DIR_NEKO_CONTROLS=...` until a release is pinned.
+- **What is left on the UI thread for a big file** is one pass of Qt's
+  `QPlainTextDocumentLayout` over every line when the editor adopts the document
+  (~65 ms for 10 MiB, ~380 ms for 50 MiB / 1.7 M lines). Avoiding it would take a
+  layout of our own.
 - `QSyntaxHighlighter` keeps formats for every block; files over
   `EditorTab::kHighlightLimit` (32 MiB) are shown plain.
 - Not built yet: Find in Files, bracket matching (needs an extra-selection hook in

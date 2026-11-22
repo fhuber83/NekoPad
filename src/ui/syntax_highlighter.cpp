@@ -33,14 +33,13 @@ namespace {
 } // namespace
 
 SyntaxHighlighter::SyntaxHighlighter(QTextDocument* document, const Language& language, bool dark)
-    : QSyntaxHighlighter(static_cast<QObject*>(nullptr)),
+    : QSyntaxHighlighter(document), // the document's child: it goes where the document goes
       language_(&language) {
     json_ = language.id == u"json";
     yaml_ = language.id == u"yaml";
     wordComment_ = !language.lineComment.isEmpty() && language.lineComment.front().isLetter();
     hashNeedsSpace_ = language.lineComment == u"#" && language.variables;
-    buildFormats(dark);
-    setDocument(document); // after the formats: this schedules the first pass
+    buildFormats(dark); // before the first pass, which QSyntaxHighlighter schedules for later
 }
 
 void SyntaxHighlighter::setDark(bool dark) {

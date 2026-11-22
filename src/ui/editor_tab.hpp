@@ -28,18 +28,20 @@ namespace neko::pad::ui {
 /// its file until it is first shown (setPendingFile), so a restored session with many
 /// files opens as fast as one with a single file.
 ///
-/// Large texts stream into the editor in slices from the event loop (the first screen
-/// shows at once); files larger than kHighlightLimit are shown without highlighting.
+/// A large text is built into its QTextDocument, and highlighted, on that worker too: the
+/// UI thread only adopts the finished document. Files larger than kHighlightLimit are
+/// shown without highlighting.
 class EditorTab final : public QWidget {
     Q_OBJECT
 
 public:
     /// Larger files are shown without syntax highlighting.
     static constexpr qint64 kHighlightLimit = 32LL * 1024 * 1024;
-    /// Texts longer than this (in characters) stream into the editor in slices.
-    static constexpr qsizetype kStreamThreshold = 1024 * 1024;
-    static constexpr qsizetype kFirstSlice = 64 * 1024;
-    static constexpr qsizetype kSlice = 512 * 1024;
+    /// Texts longer than this (in characters) are built into a document -- and highlighted
+    /// -- on the worker thread that read them; the editor then only adopts the document
+    /// (CodeEditor::replaceDocument). Meanwhile the first kPreviewChars show, read-only.
+    static constexpr qsizetype kPrebuildThreshold = 256 * 1024;
+    static constexpr qsizetype kPreviewChars = 64 * 1024;
 
     enum class LoadState {
         Ready,   ///< has its text (or is a new document)
@@ -75,8 +77,17 @@ public:
     void ensureLoaded();
     /// Reads the file again (dropping unsaved changes), in `forced` if given.
     void reload(std::optional<Encoding> forced = std::nullopt);
-    /// The synchronous half of load(), for a file already read.
-    void applyLoaded(const QString& path, const LoadedFile& file);
+    /// What a load() worker hands to the UI thread: the file, and for a large one the
+    /// document already built from it (owned by whoever receives it).
+    struct Prepared {
+        LoadedFile file;
+        const Language* language = nullptr; ///< detected (or chosen) on the worker
+        QTextDocument* document = nullptr;  ///< moved to the UI thread; null for small files
+        bool highlightSuppressed = false;
+        bool dark = false; ///< the colours the worker's highlighter used
+    };
+    /// The UI-thread half of load(). Exposed for tests and benchmarks.
+    void applyLoaded(const QString& path, const Prepared& prepared);
 
     /// Writes the document to filePath(), or to `path` (Save As: the tab takes it).
     [[nodiscard]] SaveResult save();
@@ -151,8 +162,12 @@ protected:
 
 private:
     void installHighlighter();
-    void appendSlice(quint64 generation);
+    void showPreview(const QString& text);
+    void endPreview();
     void finishLoading();
+    /// After the editor took a new document: follow it, give it the view options.
+    void documentReplaced();
+    void applyTextOptions();
     /// The first and last line the selection touches; a selection ending at the start of
     /// a line does not touch it.
     [[nodiscard]] std::pair<int, int> selectedLineRange() const;
@@ -168,9 +183,11 @@ private:
     QDateTime knownModified_;
     std::optional<std::pair<int, int>> pendingCursor_;
     quint64 loadGeneration_ = 0; ///< ignores the result of a load that a newer one replaced
-    QString streamText_;         ///< the text still streaming into the editor
-    qsizetype streamPos_ = 0;
-    bool userReadOnly_ = false; ///< read-only as the user set it, while loading forces it
+    bool previewing_ = false;    ///< the editor shows the start of a file still being built
+    bool userReadOnly_ = false;  ///< read-only as the user set it, while a preview forces it
+    bool showSpaces_ = false;
+    bool showEols_ = false;
+    QMetaObject::Connection modificationConnection_;
 
     Encoding encoding_ = Encoding::Utf8;
     Eol eol_ = nativeEol();

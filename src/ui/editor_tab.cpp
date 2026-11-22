@@ -13,10 +13,11 @@
 #include <QDropEvent>
 #include <QFileInfo>
 #include <QMimeData>
+#include <QPlainTextDocumentLayout>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QThread>
 #include <QThreadPool>
-#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -57,6 +58,31 @@ namespace {
     return !urls.isEmpty() && std::ranges::all_of(urls, [](const QUrl& u) { return u.isLocalFile(); });
 }
 
+/// Whether `language` is highlighted at this size.
+[[nodiscard]] bool highlightAllowed(const Language& language, qint64 fileSize, qsizetype characters) {
+    return language.family != LanguageFamily::Plain && fileSize <= EditorTab::kHighlightLimit &&
+           characters <= EditorTab::kHighlightLimit;
+}
+
+/// A highlighter for `language` on `document`, as the document's child; nullptr for plain
+/// text. Any thread: the one the document lives in.
+QSyntaxHighlighter* makeHighlighter(QTextDocument* document, const Language& language, bool dark) {
+    switch (language.family) {
+    case LanguageFamily::Plain:
+        return nullptr;
+    case LanguageFamily::Markdown:
+        return new ed::MarkdownHighlighter(document, dark);
+    default:
+        return new SyntaxHighlighter(document, language, dark);
+    }
+}
+
+/// The start of `text` up to about `limit` characters, ending after a line break.
+[[nodiscard]] QString previewOf(const QString& text, qsizetype limit) {
+    const qsizetype newline = text.indexOf(u'\n', std::min(limit, text.size()));
+    return newline < 0 ? text : text.first(newline + 1);
+}
+
 } // namespace
 
 EditorTab::EditorTab(QWidget* parent)
@@ -76,7 +102,9 @@ EditorTab::EditorTab(QWidget* parent)
     setFocusProxy(editor_);
     editor_->viewport()->installEventFilter(this);
 
-    connect(editor_->document(), &QTextDocument::modificationChanged, this, &EditorTab::infoChanged);
+    modificationConnection_ =
+        connect(editor_->document(), &QTextDocument::modificationChanged, this, &EditorTab::infoChanged);
+    connect(editor_, &ed::CodeEditor::documentReplaced, this, &EditorTab::documentReplaced);
     // CodeEditor takes EditorDefaults' font when it changes; keep the zoom on top of it.
     connect(&ed::EditorDefaults::instance(), &ed::EditorDefaults::fontChanged, this, [this] { setZoom(zoom_); });
 }
@@ -108,30 +136,85 @@ void EditorTab::ensureLoaded() {
 }
 
 void EditorTab::load(const QString& path, std::optional<Encoding> forced) {
-    if (!streamText_.isEmpty()) {
-        // Interrupting a file that streams in: undo what streaming changed.
-        streamText_.clear();
-        streamPos_ = 0;
-        editor_->document()->setUndoRedoEnabled(true);
-        editor_->setReadOnly(userReadOnly_);
-    }
+    endPreview();
     path_ = path;
     state_ = LoadState::Loading;
     error_.clear();
     const quint64 generation = ++loadGeneration_;
     QPointer<EditorTab> self(this);
-    QThreadPool::globalInstance()->start([self, path, forced, generation] {
-        LoadedFile file = loadTextFile(path, forced);
+    // What the worker needs to know of this tab, copied: it must not touch the tab.
+    // The editor's font and text options (tabs, wrapping, visible whitespace): built with
+    // them, the document is laid out once when the editor adopts it, not three times.
+    const QFont font = editor_->font();
+    const QTextOption options = editor_->document()->defaultTextOption();
+    const bool dark = dark_;
+    const Language* chosen = languageChosen_ ? language_ : nullptr;
+    QThread* const uiThread = thread();
+    QThreadPool::globalInstance()->start([=] {
+        Prepared p;
+        p.file = loadTextFile(path, forced);
+        p.dark = dark;
+        const QString& text = p.file.decoded.text;
+        if (p.file.ok && text.size() > kPrebuildThreshold) {
+            // Something to look at while the document is built.
+            QMetaObject::invokeMethod(
+                qApp,
+                [self, generation, preview = previewOf(text, kPreviewChars)] {
+                    if (self && self->loadGeneration_ == generation) {
+                        self->showPreview(preview);
+                    }
+                },
+                Qt::QueuedConnection);
+
+            // The expensive part, here rather than on the UI thread: a QTextDocument may be
+            // built in any thread, and so may its highlighter run (block formats only).
+            p.language = chosen ? chosen : &detectLanguage(path, firstLineOf(text));
+            auto* doc = new QTextDocument;
+            doc->setDocumentLayout(new QPlainTextDocumentLayout(doc));
+            doc->setDefaultFont(font);
+            doc->setDefaultTextOption(options);
+            doc->setPlainText(text);
+            if (highlightAllowed(*p.language, p.file.size, text.size())) {
+                if (QSyntaxHighlighter* h = makeHighlighter(doc, *p.language, dark)) {
+                    h->rehighlight();
+                }
+            } else {
+                p.highlightSuppressed = p.language->family != LanguageFamily::Plain;
+            }
+            doc->setModified(false);
+            doc->moveToThread(uiThread); // with its children: layout and highlighter
+            p.document = doc;
+            p.file.decoded.text = QString(); // the document holds it now
+        }
         QMetaObject::invokeMethod(
             qApp,
-            [self, path, generation, file = std::move(file)] {
+            [self, path, generation, p] {
                 if (self && self->loadGeneration_ == generation) {
-                    self->applyLoaded(path, file);
+                    self->applyLoaded(path, p);
+                } else {
+                    delete p.document; // replaced by a newer load, or the tab is gone
                 }
             },
             Qt::QueuedConnection);
     });
     emit infoChanged();
+}
+
+void EditorTab::showPreview(const QString& text) {
+    if (state_ != LoadState::Loading || !editor_->document()->isEmpty()) {
+        return; // a reload keeps showing the old text until the new one is ready
+    }
+    previewing_ = true;
+    userReadOnly_ = editor_->isReadOnly();
+    editor_->setReadOnly(true);
+    editor_->setPlainText(text);
+}
+
+void EditorTab::endPreview() {
+    if (previewing_) {
+        previewing_ = false;
+        editor_->setReadOnly(userReadOnly_);
+    }
 }
 
 void EditorTab::reload(std::optional<Encoding> forced) {
@@ -142,10 +225,13 @@ void EditorTab::reload(std::optional<Encoding> forced) {
     load(path_, forced);
 }
 
-void EditorTab::applyLoaded(const QString& path, const LoadedFile& file) {
+void EditorTab::applyLoaded(const QString& path, const Prepared& prepared) {
     ++loadGeneration_; // a load still running for this tab is outdated now
+    endPreview();
     path_ = path;
+    const LoadedFile& file = prepared.file;
     if (!file.ok) {
+        delete prepared.document;
         state_ = LoadState::Failed;
         error_ = file.error;
         emit loaded();
@@ -160,61 +246,43 @@ void EditorTab::applyLoaded(const QString& path, const LoadedFile& file) {
     looksBinary_ = decoded.looksBinary;
     fileSize_ = file.size;
     knownModified_ = file.modified;
-    if (!languageChosen_) {
-        language_ = &detectLanguage(path, firstLineOf(decoded.text));
-    }
     delete highlighter_;
 
-    if (decoded.text.size() <= kStreamThreshold) {
-        // Small: in one go. The highlighter goes on after the text -- attached first, it
-        // would highlight while the text goes in and then once more.
-        editor_->setPlainText(decoded.text);
-        installHighlighter();
+    if (QTextDocument* doc = prepared.document) {
+        // Built and highlighted on the worker: adopting it is all that is left. As the
+        // editor's child, the editor deletes it when the next one replaces it.
+        if (!languageChosen_ && prepared.language) {
+            language_ = prepared.language;
+        }
+        doc->setParent(editor_);
+        editor_->replaceDocument(doc);
+        highlighter_ = doc->findChild<QSyntaxHighlighter*>();
+        highlightSuppressed_ = prepared.highlightSuppressed;
+        if (prepared.dark != dark_) {
+            // The theme changed while the worker coloured it: recolour.
+            const bool wanted = dark_;
+            dark_ = prepared.dark;
+            setDark(wanted);
+        }
         finishLoading();
         return;
     }
 
-    // Large: the text goes in slice by slice from the event loop, so the first screen
-    // shows at once and the window stays responsive. Building the document is what costs
-    // (QTextDocument makes a block per line); the highlighter is attached to the empty
-    // document, so it colours each slice as it arrives instead of everything at the end.
-    state_ = LoadState::Loading;
-    userReadOnly_ = editor_->isReadOnly();
-    editor_->setReadOnly(true);
-    editor_->setPlainText(QString());
-    editor_->document()->setUndoRedoEnabled(false);
+    // Small: in one go. The highlighter goes on after the text -- attached first, it would
+    // highlight while the text goes in and then once more.
+    if (!languageChosen_) {
+        language_ = &detectLanguage(path, firstLineOf(decoded.text));
+    }
+    editor_->setPlainText(decoded.text);
     installHighlighter();
-    streamText_ = decoded.text;
-    streamPos_ = 0;
-    appendSlice(loadGeneration_);
+    finishLoading();
 }
 
-void EditorTab::appendSlice(quint64 generation) {
-    if (generation != loadGeneration_) {
-        return; // a newer load replaced this one
-    }
-    // The first slice is small, so it shows at once; the others are large enough that the
-    // per-slice overhead does not matter and small enough to keep the window responsive.
-    const qsizetype want = streamPos_ == 0 ? kFirstSlice : kSlice;
-    qsizetype end = std::min(streamText_.size(), streamPos_ + want);
-    if (end < streamText_.size()) {
-        // End the slice after a line break, so no line is laid out twice.
-        const qsizetype newline = streamText_.indexOf(u'\n', end);
-        end = newline < 0 ? streamText_.size() : newline + 1;
-    }
-    QTextCursor c(editor_->document());
-    c.movePosition(QTextCursor::End);
-    c.insertText(streamText_.sliced(streamPos_, end - streamPos_));
-    streamPos_ = end;
-    if (streamPos_ < streamText_.size()) {
-        QTimer::singleShot(0, this, [this, generation] { appendSlice(generation); });
-        return;
-    }
-    streamText_.clear();
-    streamPos_ = 0;
-    editor_->document()->setUndoRedoEnabled(true);
-    editor_->setReadOnly(userReadOnly_);
-    finishLoading();
+void EditorTab::documentReplaced() {
+    disconnect(modificationConnection_);
+    modificationConnection_ =
+        connect(editor_->document(), &QTextDocument::modificationChanged, this, &EditorTab::infoChanged);
+    applyTextOptions();
 }
 
 void EditorTab::finishLoading() {
@@ -291,22 +359,17 @@ void EditorTab::installHighlighter() {
     if (language_->family == LanguageFamily::Plain) {
         return;
     }
-    // The file's size decides for a file being loaded (the document may still be empty);
-    // the document's for one typed or pasted into.
-    if (fileSize_ > kHighlightLimit || editor_->document()->characterCount() > kHighlightLimit) {
+    // The file's size decides for a file being loaded; the document's for one typed or
+    // pasted into.
+    if (!highlightAllowed(*language_, fileSize_, editor_->document()->characterCount())) {
         highlightSuppressed_ = true;
         return;
     }
-    QTextDocument* doc = editor_->document();
-    if (language_->family == LanguageFamily::Markdown) {
-        highlighter_ = new ed::MarkdownHighlighter(doc, dark_);
-    } else {
-        highlighter_ = new SyntaxHighlighter(doc, *language_, dark_);
-    }
+    highlighter_ = makeHighlighter(editor_->document(), *language_, dark_);
 }
 
 bool EditorTab::isModified() const {
-    // While a file streams in, the document is being filled, not edited.
+    // While a file loads, the editor shows a preview, not an edit.
     return state_ == LoadState::Ready && editor_->document()->isModified();
 }
 
@@ -332,11 +395,17 @@ void EditorTab::setDark(bool dark) {
 }
 
 void EditorTab::setShowWhitespace(bool spaces, bool lineEndings) {
+    showSpaces_ = spaces;
+    showEols_ = lineEndings;
+    applyTextOptions();
+}
+
+void EditorTab::applyTextOptions() {
     QTextDocument* doc = editor_->document();
     QTextOption option = doc->defaultTextOption();
     QTextOption::Flags flags = option.flags();
-    flags.setFlag(QTextOption::ShowTabsAndSpaces, spaces);
-    flags.setFlag(QTextOption::ShowLineAndParagraphSeparators, lineEndings);
+    flags.setFlag(QTextOption::ShowTabsAndSpaces, showSpaces_);
+    flags.setFlag(QTextOption::ShowLineAndParagraphSeparators, showEols_);
     if (flags != option.flags()) {
         option.setFlags(flags);
         doc->setDefaultTextOption(option);

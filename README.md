@@ -7,8 +7,9 @@ and Qt 6 Widgets, for Windows, Linux and macOS. The editor control and the look 
 [NekoControls](https://github.com/fhuber83/NekoControls), as in Neko Grid and Neko Note.
 
 - **Fast.** No Qt WebEngine and no Chromium. Files are read, encoding-detected and decoded
-  on a worker thread. A large file streams into the editor in slices: the first screen
-  shows at once and the window stays responsive. The highlighter is a hand-written
+  on a worker thread, and for a large file the document itself is built and highlighted
+  there too: the window shows the file's start at once and is busy for ~70 ms of a
+  10 MiB file's load instead of the whole second. The highlighter is a hand-written
   scanner without regular expressions. A restored session reads only the tab you look
   at. Opening a file while Neko Pad runs hands it to the running window and quits in
   about 20 ms. Release builds use LTO and `-march=x86-64-v2`.
@@ -79,7 +80,7 @@ To see what opening a large file costs, step by step:
 | `src/core/language` | The language table: recognition and what the highlighter needs |
 | `src/core/line_ops` | The Edit menu's line operations, as pure functions |
 | `src/ui/syntax_highlighter` | One scanner per language family: code, markup, INI, diff |
-| `src/ui/editor_tab` | A document: `CodeEditor` + `EditorFindBar`, background loading, streaming |
+| `src/ui/editor_tab` | A document: `CodeEditor` + `EditorFindBar`, loading and building on a worker |
 | `src/ui/main_window` | Tabs, menus, tool bar, status bar, session, files changed on disk |
 | `src/ui/single_instance` | Hands files to the running window over a local socket |
 | `src/ui/settings` | The `QSettings` keys |

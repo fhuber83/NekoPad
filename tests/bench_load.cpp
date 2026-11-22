@@ -95,20 +95,23 @@ int main(int argc, char* argv[]) {
     tab.load(path);
     // The longest the event loop was blocked: how unresponsive the window was.
     qint64 longestStall = 0;
+    qint64 busy = 0; // time spent handling events: the UI thread's share of the work
     bool firstShown = false;
     while (tab.loadState() != neko::pad::ui::EditorTab::LoadState::Ready) {
         QElapsedTimer stall;
         stall.start();
         QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
         longestStall = std::max(longestStall, stall.elapsed());
+        busy += stall.elapsed();
         if (!firstShown && !tab.editor()->document()->isEmpty()) {
             firstShown = true;
             report("EditorTab: first text on screen", t.elapsed());
         }
     }
     QCoreApplication::processEvents();
-    report("EditorTab: all of it, highlighted", total.elapsed());
+    report("EditorTab: built, highlighted, shown", total.elapsed());
     report("  longest the window was blocked", longestStall);
+    report("  UI thread busy in total", busy);
     std::printf("  (highlighting %s)\n", tab.highlightingSuppressed() ? "off: too large" : "on");
     return 0;
 }
