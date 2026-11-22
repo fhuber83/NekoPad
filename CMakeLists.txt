@@ -56,8 +56,8 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
 include(FetchContent)
 FetchContent_Declare(
     neko_controls
-    URL      https://github.com/fhuber83/NekoControls/releases/download/v0.4.0/NekoControls-0.4.0.tar.gz
-    URL_HASH SHA256=f7ea05322e8ed049fac847bb54b376fd8c9d51d7605b87cacbf24a594b6f286b
+    URL      https://github.com/fhuber83/NekoControls/releases/download/v0.6.0/NekoControls-0.6.0.tar.gz
+    URL_HASH SHA256=8b6c6c4c7284a9912630b974eabb3c10c81af1b8ba11723fee05b36dc563335f
     SOURCE_SUBDIR _nekopad_libraries_only
 )
 FetchContent_MakeAvailable(neko_controls)

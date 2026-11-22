@@ -77,9 +77,6 @@ app without touching the real settings or meeting a running instance:
 
 ## Known limits and next steps
 
-- **This branch needs NekoControls with `CodeEditor::replaceDocument()`** (branch
-  `feat/replace-document` there, not released yet): configure with
-  `-DFETCHCONTENT_SOURCE_DIR_NEKO_CONTROLS=...` until a release is pinned.
 - **What is left on the UI thread for a big file** is one pass of Qt's
   `QPlainTextDocumentLayout` over every line when the editor adopts the document
   (~65 ms for 10 MiB, ~380 ms for 50 MiB / 1.7 M lines). Avoiding it would take a
